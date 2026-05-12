@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv/
+ENV/
+env/
+
+# --- C# / .NET ---
+**/[Bb]in/
+**/[Oo]bj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.vscode/
+
+# --- Project Specific Data ---
+# Ignore raw data and processed artifacts (large files)
+training/data/*.csv
+training/processed/
+training/*.pt
+
+# --- Inference Artifacts ---
+# Ignore exported models and quantizers
+#inference/*.onnx
+#inference/*.pkl
+#inference/Augurus.Api/quantizer_bins.json

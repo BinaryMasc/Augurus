@@ -1,0 +1,6 @@
+@Augurus.Api_HostAddress = http://localhost:5270
+
+GET {{Augurus.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -2,12 +2,20 @@
 
 Augurus is a financial market prediction system utilizing a Transformer architecture for next-token prediction and RL fine-tuning.
 
+
+_Market movement prediction using Augurus as indicator in [OpenBackTest](https://github.com/BinaryMasc/OpenBackTest)_
+![Inference Backtest](/assets/inference_backtest.png)
+
+
+## Architecture
+It employs a hybrid architecture based on a GPT-style model. This approach embeds and quantizes mixed continuous and discrete inputs into tokens, which are then processed using multi-head self-attention.
+
+
 ## Project Structure
-- **/training**: Python-based training pipeline (PyTorch).
+- **/training**: Python-based training pipeline (PyTorch) and export it to ONNX format.
 - **/inference**: C#-based API for real-time market predictions (ONNX).
 
-
-## Augurus Training Pipeline
+## Training Pipeline
 
 
 #### 1. Data Preprocessing

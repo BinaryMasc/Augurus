@@ -1,6 +1,17 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
+
+class SiGLU(nn.Module):
+    """
+    Sigmoid-Gated Linear Unit (SwiGLU variant).
+    Splits the input in half along the last dimension, applies SiLU to the first half,
+    and multiplies it by the second half.
+    """
+    def forward(self, x):
+        gate, val = x.chunk(2, dim=-1)
+        return F.silu(gate) * val
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -33,15 +44,20 @@ class FinancialTransformer(nn.Module):
         
         self.pos_encoder = PositionalEncoding(d_model)
         
-        # Standard GPT-style Transformer Decoder
+        # Transformer Decoder with SiGLU Activation
+        # We double dim_feedforward because SiGLU splits the dimension in half
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, 
             nhead=nhead, 
-            dim_feedforward=d_model * 4, 
+            dim_feedforward=d_model * 4 * 2, 
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
+            activation=SiGLU()
         )
-        self.transformer = nn.TransformerEncoder(decoder_layer, num_layers=num_layers)
+        # Patch linear2 to accept the chunked dimension from SiGLU
+        decoder_layer.linear2 = nn.Linear(d_model * 4, d_model)
+        
+        self.transformer = nn.TransformerEncoder(decoder_layer, num_layers=num_layers, enable_nested_tensor=False)
         
         # Output head for Next-Token Prediction
         self.fc_out = nn.Linear(d_model, vocab_size)

@@ -49,7 +49,7 @@ def train_phase1():
     SEQ_LEN = MODEL_CONFIG['seq_len']
     BATCH_SIZE = 128
     EPOCHS = 5  
-    LR = 3e-4
+    LR = 2e-4
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -89,7 +89,7 @@ def train_phase1():
     start_epoch = 0
 
     # TEMP
-    checkpoint_path = "processed/model_epoch_5.pt"
+    checkpoint_path = "processed/model_epoch_10.pt"
     if os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE), strict=False)

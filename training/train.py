@@ -107,6 +107,8 @@ def train_phase1():
     for epoch in range(start_epoch, EPOCHS):
         model.train()
         total_loss = 0
+        total_correct = 0
+        total_samples = 0
         
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Train]")
         for x_tok, x_cont, y_tok in progress_bar:
@@ -129,13 +131,26 @@ def train_phase1():
             scheduler.step()  # Step the scheduler each batch
             
             total_loss += loss.item()
-            progress_bar.set_postfix(loss=loss.item())
+            
+            # Calculate direction accuracy
+            preds = torch.argmax(logits, dim=-1)
+            # Tokens > 127 are positive returns (Up), <= 127 are negative/neutral (Down)
+            pred_up = preds > 127
+            true_up = y_tok > 127
+            total_correct += (pred_up == true_up).sum().item()
+            total_samples += y_tok.numel()
+            
+            acc = total_correct / total_samples * 100
+            progress_bar.set_postfix(loss=loss.item(), acc=f"{acc:.2f}%")
             
         avg_train_loss = total_loss / len(train_loader)
+        train_acc = total_correct / total_samples * 100
         
         # Validation Loop
         model.eval()
         val_loss = 0
+        val_correct = 0
+        val_samples = 0
         val_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Val]")
         with torch.no_grad():
             for x_tok, x_cont, y_tok in val_bar:
@@ -144,19 +159,28 @@ def train_phase1():
                 loss = criterion(logits.view(-1, 256), y_tok.view(-1))
                 val_loss += loss.item()
                 
+                # Calculate direction accuracy
+                preds = torch.argmax(logits, dim=-1)
+                # Tokens > 127 are positive returns (Up), <= 127 are negative/neutral (Down)
+                pred_up = preds > 127
+                true_up = y_tok > 127
+                val_correct += (pred_up == true_up).sum().item()
+                val_samples += y_tok.numel()
+                
+                acc = val_correct / val_samples * 100
+                val_bar.set_postfix(loss=loss.item(), acc=f"{acc:.2f}%")
+                
         avg_val_loss = val_loss / len(val_loader)
+        val_acc = val_correct / val_samples * 100
         
-        print(f"Epoch {epoch+1} Summary | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        print(f"Epoch {epoch+1} Summary | Train Loss: {avg_train_loss:.4f} ({train_acc:.2f}%) | Val Loss: {avg_val_loss:.4f} ({val_acc:.2f}%)")
         
-        save_path = f"processed/model_epoch_{epoch+1}.pt"
-        torch.save(model.state_dict(), save_path)
-        print(f"Checkpoint saved to {save_path}\n")
         # Save checkpoint every 5 epochs
         #if (epoch + 1) % 5 == 0:
-        # if (epoch + 1) % 2 == 0:
-        #     save_path = f"processed/model_epoch_{epoch+1}.pt"
-        #     torch.save(model.state_dict(), save_path)
-        #     print(f"Checkpoint saved to {save_path}\n")
+        if (epoch + 1) % 1 == 0:
+            save_path = f"processed/model_epoch_{epoch+1}.pt"
+            torch.save(model.state_dict(), save_path)
+            print(f"Checkpoint saved to {save_path}\n")
             
 
 if __name__ == "__main__":

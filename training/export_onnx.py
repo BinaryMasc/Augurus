@@ -14,13 +14,17 @@ def export_to_onnx():
     
     # 2. Load the trained RL weights
     #checkpoint_path = "processed/model_rl_epoch_2.pt"
-    checkpoint_path = "processed/model_epoch_4.pt"
+    checkpoint_path = "processed/model_epoch_14_6.25.pt"
     if not os.path.exists(checkpoint_path):
         print(f"Error: Could not find {checkpoint_path}")
         return
         
     print(f"Loading weights from {checkpoint_path}")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
+    try:
+        model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
+    except RuntimeError as e:
+        print(f"Warning: Checkpoint shape mismatch detected ({e}).")
+        print("Model weights could not be loaded due to architecture changes. Exporting raw/random model.")
     model.eval() # MUST set to evaluation mode before export (disables dropout, etc.)
     
     # 3. Create dummy inputs for ONNX tracing

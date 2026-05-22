@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from model import FinancialTransformer
-from config import MODEL_CONFIG
+from config import MODEL_CONFIG, WEIGHT_DECAY, GAUSSIAN_NOISE
 import os
 
 class FinancialDataset(Dataset):
@@ -13,8 +13,8 @@ class FinancialDataset(Dataset):
         self.seq_len = seq_len
         self.is_training = is_training
         
-        # Continuous features: hour_sin, hour_cos, day_sin, day_cos, norm_return
-        cont_cols = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos', 'norm_return']
+        # Continuous features: hour_sin, hour_cos, day_sin, day_cos, norm_return, ema12_dist, ema26_dist
+        cont_cols = ['hour_sin', 'hour_cos', 'day_sin', 'day_cos', 'norm_return', 'ema12_dist', 'ema26_dist']
         
         # Verify format
         missing = [c for c in cont_cols if c not in df.columns]
@@ -35,7 +35,7 @@ class FinancialDataset(Dataset):
         
         # Adding noise to continuous features during training (prevent memorization)
         if self.is_training:
-            noise = torch.randn_like(x_cont) * 0.02 # 2% noise
+            noise = torch.randn_like(x_cont) * GAUSSIAN_NOISE
             x_cont = x_cont + noise
         
         # Target sequence (t+1 to t + seq_len)
@@ -48,7 +48,7 @@ def train_phase1():
     # 1. Configuration
     SEQ_LEN = MODEL_CONFIG['seq_len']
     BATCH_SIZE = 128
-    EPOCHS = 5  
+    EPOCHS = 14  
     LR = 2e-4
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -89,15 +89,19 @@ def train_phase1():
     start_epoch = 0
 
     # TEMP
-    checkpoint_path = "processed/model_epoch_10.pt"
+    checkpoint_path = "processed/model_epoch_6_6.45.pt"
     if os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
-        model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE), strict=False)
-        start_epoch = 5
+        try:
+            model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE), strict=False)
+            start_epoch = 5
+        except RuntimeError as e:
+            print(f"Warning: Checkpoint shape mismatch detected ({e}).")
+            print("Initializing model from scratch due to architecture changes.")
     
     #
     # Increased weight decay for regularization
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.05)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     # Added label smoothing so the model doesn't become overconfident
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     # Added a learning rate scheduler to decay LR over time
@@ -105,10 +109,19 @@ def train_phase1():
     
     print(f"\nStarting Phase 1 Training (Next-Token Prediction) on {DEVICE}...")
     for epoch in range(start_epoch, EPOCHS):
+        # Manual learning rate decay at epoch 5 (Epoch 6)
+        if epoch == 5:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = 5e-5  # Set LR lower
+            # Update scheduler base LRs so it continues annealing correctly from the new level
+            scheduler.base_lrs = [5e-5 for _ in scheduler.base_lrs]
+            print(f"\n[LR Scheduler] Manual learning rate decay at epoch {epoch+1}. New LR: {optimizer.param_groups[0]['lr']}")
+
         model.train()
         total_loss = 0
         total_correct = 0
         total_samples = 0
+            
         
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Train]")
         for x_tok, x_cont, y_tok in progress_bar:
@@ -122,7 +135,16 @@ def train_phase1():
             # Flatten for CrossEntropyLoss
             # logits: [batch, seq_len, vocab_size] -> [batch * seq_len, vocab_size]
             # y_tok: [batch, seq_len] -> [batch * seq_len]
-            loss = criterion(logits.view(-1, 256), y_tok.view(-1))
+            token_loss = criterion(logits.view(-1, 256), y_tok.view(-1))
+            
+            # Auxiliary Directional Loss (Binary Cross Entropy)
+            probs = torch.softmax(logits, dim=-1)
+            pred_up = probs[..., 128:].sum(dim=-1).view(-1)
+            true_up = (y_tok.view(-1) > 127).float()
+            bce_loss = nn.functional.binary_cross_entropy(pred_up.clamp(1e-7, 1.0 - 1e-7), true_up)
+            
+            # Combine losses to directly optimize direction prediction
+            loss = token_loss + 1.0 * bce_loss
             
             # Backward pass
             loss.backward()
@@ -156,7 +178,15 @@ def train_phase1():
             for x_tok, x_cont, y_tok in val_bar:
                 x_tok, x_cont, y_tok = x_tok.to(DEVICE), x_cont.to(DEVICE), y_tok.to(DEVICE)
                 logits, _, _ = model(x_tok, x_cont)
-                loss = criterion(logits.view(-1, 256), y_tok.view(-1))
+                token_loss = criterion(logits.view(-1, 256), y_tok.view(-1))
+                
+                # Auxiliary Directional Loss (Binary Cross Entropy)
+                probs = torch.softmax(logits, dim=-1)
+                pred_up = probs[..., 128:].sum(dim=-1).view(-1)
+                true_up = (y_tok.view(-1) > 127).float()
+                bce_loss = nn.functional.binary_cross_entropy(pred_up.clamp(1e-7, 1.0 - 1e-7), true_up)
+                
+                loss = token_loss + 1.0 * bce_loss
                 val_loss += loss.item()
                 
                 # Calculate direction accuracy
@@ -178,7 +208,7 @@ def train_phase1():
         # Save checkpoint every 5 epochs
         #if (epoch + 1) % 5 == 0:
         if (epoch + 1) % 1 == 0:
-            save_path = f"processed/model_epoch_{epoch+1}.pt"
+            save_path = f"processed/model_epoch_{epoch+1}_{avg_val_loss:.2f}.pt"
             torch.save(model.state_dict(), save_path)
             print(f"Checkpoint saved to {save_path}\n")
             

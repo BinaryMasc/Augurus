@@ -41,6 +41,20 @@ public class InferenceEngine
         double rollingVol = Math.Sqrt(sumSq / (logReturns.Length - 1));
         if (rollingVol == 0) rollingVol = 1e-8;
 
+        // Calculate EMAs recursively (matches Python's ewm(adjust=False))
+        double[] ema12 = new double[Candles.Count];
+        double[] ema26 = new double[Candles.Count];
+        double alpha12 = 2.0 / (12.0 + 1.0);
+        double alpha26 = 2.0 / (26.0 + 1.0);
+
+        ema12[0] = Candles[0].Close;
+        ema26[0] = Candles[0].Close;
+        for (int i = 1; i < Candles.Count; i++)
+        {
+            ema12[i] = alpha12 * Candles[i].Close + (1.0 - alpha12) * ema12[i - 1];
+            ema26[i] = alpha26 * Candles[i].Close + (1.0 - alpha26) * ema26[i - 1];
+        }
+
         // 2. Prepare Tensors
         var tokens = new long[1, ModelConfig.SeqLen];
         var continuous = new float[1, ModelConfig.SeqLen, ModelConfig.NumContinuousFeatures];
@@ -61,11 +75,18 @@ public class InferenceEngine
             continuous[0, i, 2] = (float)Math.Sin(2 * Math.PI * (int)candle.Timestamp.DayOfWeek / 7.0);
             continuous[0, i, 3] = (float)Math.Cos(2 * Math.PI * (int)candle.Timestamp.DayOfWeek / 7.0);
             continuous[0, i, 4] = (float)normReturn;
+            
+            // EMA distances
+            continuous[0, i, 5] = (float)((candle.Close - ema12[i]) / (ema12[i] + 1e-8));
+            continuous[0, i, 6] = (float)((candle.Close - ema26[i]) / (ema26[i] + 1e-8));
         }
 
         List<double> predictedPrices = new();
         double currentClose = Candles.Last().Close;
         DateTime currentTime = Candles.Last().Timestamp;
+        double currentEma12 = ema12.Last();
+        double currentEma26 = ema26.Last();
+        double directionalBias = 0.5;
 
         // 3. Autoregressive Loop for 5 future candles
         for (int step = 0; step < 5; step++)
@@ -84,22 +105,36 @@ public class InferenceEngine
             // Use Phase 1 output (Next-Token Prediction)
             var nextTokenLogits = results.First(r => r.Name == "next_token_logits").AsTensor<float>();
 
-            // Find argmax token for the very last step in the sequence
-            int bestToken = 0;
-            float maxLogit = float.MinValue;
+            // Calculate probabilities over vocab via Softmax
+            double sumExp = 0.0;
+            double[] probs = new double[ModelConfig.VocabSize];
             for (int i = 0; i < ModelConfig.VocabSize; i++)
             {
                 float logit = nextTokenLogits[0, ModelConfig.SeqLen - 1, i];
-                if (logit > maxLogit)
+                double expVal = Math.Exp(logit);
+                probs[i] = expVal;
+                sumExp += expVal;
+            }
+
+            double expectedNormReturn = 0.0;
+            double probUp = 0.0;
+            for (int i = 0; i < ModelConfig.VocabSize; i++)
+            {
+                probs[i] /= sumExp;
+                expectedNormReturn += probs[i] * GetNormReturnFromToken(i);
+                if (i >= 128)
                 {
-                    maxLogit = logit;
-                    bestToken = i;
+                    probUp += probs[i];
                 }
             }
 
-            // Un-quantize token to $ Return
-            double predictedNormReturn = GetNormReturnFromToken(bestToken);
-            double predictedLogReturn = predictedNormReturn * rollingVol;
+            // Expose the directional probability of the very first predicted step
+            if (step == 0)
+            {
+                directionalBias = probUp;
+            }
+
+            double predictedLogReturn = expectedNormReturn * rollingVol;
             double nextClose = currentClose * Math.Exp(predictedLogReturn);
             predictedPrices.Add(nextClose);
 
@@ -111,21 +146,30 @@ public class InferenceEngine
                     continuous[0, i, j] = continuous[0, i + 1, j];
             }
 
-            // Append new state at sequence end
-            currentTime = currentTime.AddMinutes(1);
-            tokens[0, ModelConfig.SeqLen - 1] = bestToken;
+            // Update EMAs for next step recursively
+            currentEma12 = alpha12 * nextClose + (1.0 - alpha12) * currentEma12;
+            currentEma26 = alpha26 * nextClose + (1.0 - alpha26) * currentEma26;
+            double ema12Dist = (nextClose - currentEma12) / (currentEma12 + 1e-8);
+            double ema26Dist = (nextClose - currentEma26) / (currentEma26 + 1e-8);
+
+            // Append new state at sequence end (5-minute bars)
+            currentTime = currentTime.AddMinutes(5);
+            tokens[0, ModelConfig.SeqLen - 1] = GetToken(expectedNormReturn);
             continuous[0, ModelConfig.SeqLen - 1, 0] = (float)Math.Sin(2 * Math.PI * currentTime.Hour / 24.0);
             continuous[0, ModelConfig.SeqLen - 1, 1] = (float)Math.Cos(2 * Math.PI * currentTime.Hour / 24.0);
             continuous[0, ModelConfig.SeqLen - 1, 2] = (float)Math.Sin(2 * Math.PI * (int)currentTime.DayOfWeek / 7.0);
             continuous[0, ModelConfig.SeqLen - 1, 3] = (float)Math.Cos(2 * Math.PI * (int)currentTime.DayOfWeek / 7.0);
-            continuous[0, ModelConfig.SeqLen - 1, 4] = (float)predictedNormReturn;
+            continuous[0, ModelConfig.SeqLen - 1, 4] = (float)expectedNormReturn;
+            continuous[0, ModelConfig.SeqLen - 1, 5] = (float)ema12Dist;
+            continuous[0, ModelConfig.SeqLen - 1, 6] = (float)ema26Dist;
 
             currentClose = nextClose;
         }
 
         return new PredictionResponse
         {
-            PredictedClosePrices = predictedPrices
+            PredictedClosePrices = predictedPrices,
+            DirectionalBias = directionalBias
         };
     }
 

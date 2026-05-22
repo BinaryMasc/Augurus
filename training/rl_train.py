@@ -36,11 +36,15 @@ def rl_phase2():
     # 3. Initialize Model and load Phase 1 weights
     model = FinancialTransformer(**MODEL_CONFIG).to(DEVICE)
     
-    checkpoint_path = "processed/model_epoch_3.pt"
+    checkpoint_path = "processed/model_epoch_6_5.69.pt"
     if os.path.exists(checkpoint_path):
         print(f"Loading Phase 1 weights from {checkpoint_path}")
         # strict=False allows us to load the weights even though we just added a new critic_head
-        model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE), strict=False)
+        try:
+            model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE), strict=False)
+        except RuntimeError as e:
+            print(f"Warning: Checkpoint shape mismatch detected ({e}).")
+            print("Initializing model from scratch due to architecture changes.")
     else:
         print("Warning: Phase 1 checkpoint not found. Starting from scratch.")
         

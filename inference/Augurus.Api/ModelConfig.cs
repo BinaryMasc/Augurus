@@ -7,10 +7,10 @@ public static class ModelConfig
     
     public const int SeqLen = 64;
     public const int VocabSize = 256;
-    public const int NumContinuousFeatures = 5;
+    public const int NumContinuousFeatures = 7;
     
     // Architectural parameters (Baked into ONNX, kept here for reference)
-    public const int DModel = 64;
+    public const int DModel = 128;
     public const int NHead = 8;
-    public const int NumLayers = 4;
+    public const int NumLayers = 5;
 }

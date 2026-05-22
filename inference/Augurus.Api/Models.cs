@@ -19,4 +19,5 @@ public class Candle
 public class PredictionResponse
 {
     public List<double> PredictedClosePrices { get; set; } = new();
+    public double DirectionalBias { get; set; } // Probability of next candle being Up (0.0 to 1.0)
 }

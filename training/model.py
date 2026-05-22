@@ -13,36 +13,45 @@ class SiGLU(nn.Module):
         gate, val = x.chunk(2, dim=-1)
         return F.silu(gate) * val
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+class Time2Vec(nn.Module):
+    """
+    Time2Vec periodic time representation.
+    Maps input features to a vector containing one linear projection and periodic (sine) projections.
+    """
+    def __init__(self, in_features, out_features):
         super().__init__()
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        self.out_features = out_features
+        self.w0 = nn.parameter.Parameter(torch.randn(in_features, 1))
+        self.b0 = nn.parameter.Parameter(torch.randn(1))
+        self.w = nn.parameter.Parameter(torch.randn(in_features, out_features - 1))
+        self.b = nn.parameter.Parameter(torch.randn(out_features - 1))
 
     def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [seq_len, batch_size, embedding_dim]
-        """
-        x = x + self.pe[:x.size(0)]
-        return x
+        v1 = torch.matmul(x, self.w0) + self.b0
+        v2 = torch.sin(torch.matmul(x, self.w) + self.b)
+        return torch.cat([v1, v2], dim=-1)
 
 class FinancialTransformer(nn.Module):
-    def __init__(self, vocab_size=256, d_model=256, nhead=8, num_layers=6, dropout=0.1, num_continuous_features=5, **kwargs):
+    def __init__(self, vocab_size=256, d_model=256, nhead=8, num_layers=6, dropout=0.1, num_continuous_features=7, **kwargs):
         super().__init__()
         self.d_model = d_model
         
         # Discrete Token Embedding (0-255 bins)
         self.token_emb = nn.Embedding(vocab_size, d_model)
         
-        # Continuous Feature Embedding (hour_sin, hour_cos, day_sin, day_cos, norm_volume, etc.)
-        self.continuous_emb = nn.Linear(num_continuous_features, d_model)
+        # Feature-wise Continuous Embeddings:
+        # Time features (first 4 features: hour_sin, hour_cos, day_sin, day_cos)
+        self.time_t2v = Time2Vec(in_features=4, out_features=d_model)
         
-        self.pos_encoder = PositionalEncoding(d_model)
+        # Other continuous features (norm_return, ema12_dist, ema26_dist)
+        self.norm_return_emb = nn.Linear(1, d_model)
+        self.ema12_emb = nn.Linear(1, d_model)
+        self.ema26_emb = nn.Linear(1, d_model)
+        
+        # Learned Positional Embedding
+        seq_len = kwargs.get('seq_len', 64)
+        max_positions = max(seq_len * 2, 2048)
+        self.pos_emb = nn.Embedding(max_positions, d_model)
         
         # Transformer Decoder with SiGLU Activation
         # We double dim_feedforward because SiGLU splits the dimension in half
@@ -63,11 +72,9 @@ class FinancialTransformer(nn.Module):
         self.fc_out = nn.Linear(d_model, vocab_size)
         
         # Actor Head for PPO (Phase 2 RL)
-        # Outputs logits for: Buy, Sell, Hold
         self.actor_head = nn.Linear(d_model, 3)
         
         # Critic Head for PPO (Phase 2 RL)
-        # Outputs estimated value of the current state
         self.critic_head = nn.Linear(d_model, 1)
 
     def generate_square_subsequent_mask(self, sz):
@@ -80,11 +87,28 @@ class FinancialTransformer(nn.Module):
         continuous_features: [batch_size, seq_len, num_features] (Floats)
         """
         # 1. Embeddings
-        # Convert tokens to dense vectors
         x_tok = self.token_emb(tokens)
         
-        # Map continuous features to same dimension
-        x_cont = self.continuous_emb(continuous_features)
+        # Feature-wise embeddings:
+        # Split time features and non-time features
+        # continuous_features shape: [batch_size, seq_len, 7]
+        # index 0-3: hour_sin, hour_cos, day_sin, day_cos
+        # index 4: norm_return
+        # index 5: ema12_dist
+        # index 6: ema26_dist
+        time_feats = continuous_features[:, :, :4]
+        norm_ret_feat = continuous_features[:, :, 4:5]
+        ema12_feat = continuous_features[:, :, 5:6]
+        ema26_feat = continuous_features[:, :, 6:7]
+        
+        # Project each feature to d_model
+        x_time = self.time_t2v(time_feats)
+        x_norm_ret = self.norm_return_emb(norm_ret_feat)
+        x_ema12 = self.ema12_emb(ema12_feat)
+        x_ema26 = self.ema26_emb(ema26_feat)
+        
+        # Sum continuous feature embeddings
+        x_cont = x_time + x_norm_ret + x_ema12 + x_ema26
         
         # Combine embeddings (Additive fusion)
         x = x_tok + x_cont
@@ -93,22 +117,18 @@ class FinancialTransformer(nn.Module):
         x = x * math.sqrt(self.d_model)
         
         # 2. Positional Encoding
-        x = x.transpose(0, 1) # [seq_len, batch_size, d_model]
-        x = self.pos_encoder(x)
-        x = x.transpose(0, 1) # [batch_size, seq_len, d_model]
+        seq_len = x.size(1)
+        positions = torch.arange(seq_len, device=x.device).unsqueeze(0) # [1, seq_len]
+        x = x + self.pos_emb(positions)
         
         # 3. Causal Mask to prevent looking into the future
-        seq_len = x.size(1)
         mask = self.generate_square_subsequent_mask(seq_len).to(x.device)
         
         # 4. Transformer Forward
         output = self.transformer(x, mask=mask, is_causal=True)
         
         # 5. Predictions
-        # Phase 1 Target: Next-Token logits (predicting the 0-255 token of the next candle)
         logits = self.fc_out(output)
-        
-        # Phase 2 Target: Trading action probabilities & Value estimation
         action_logits = self.actor_head(output)
         state_values = self.critic_head(output)
         
@@ -121,7 +141,7 @@ if __name__ == "__main__":
     
     # Mock data: Batch of 32 sequences, each 100 candles long
     mock_tokens = torch.randint(0, 256, (32, 100))
-    mock_continuous = torch.randn(32, 100, 5)
+    mock_continuous = torch.randn(32, 100, 7)
     
     logits, action_logits, state_values = model(mock_tokens, mock_continuous)
     
